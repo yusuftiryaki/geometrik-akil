@@ -151,9 +151,12 @@ class GeometrikAkil(nn.Module):
 
     def _seed_canvas(self, trans_out: dict,
                       H_outs: torch.Tensor,
-                      W_outs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                      W_outs: torch.Tensor,
+                      test_input: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Stage 2: SeedMLP ile cikti canvas'i olustur.
+
+        test_input: [B, 11, 30, 30] copy-prior icin (identity/color_swap/mirror)
 
         Donus: (color_logits [B,11,30,30], latent_0 [B,L,30,30])
         """
@@ -162,6 +165,7 @@ class GeometrikAkil(nn.Module):
             task_emb     = trans_out['task_emb'],      # [B, D]
             H_outs       = H_outs,
             W_outs       = W_outs,
+            test_input   = test_input,                  # [B, 11, 30, 30]
         )
 
     def _run_nca(self, color_0: torch.Tensor,
@@ -230,8 +234,11 @@ class GeometrikAkil(nn.Module):
         H_out_true = batch['H_out'].to(device)   # [B]
         W_out_true = batch['W_out'].to(device)   # [B]
 
-        # Stage 2: SeedMLP
-        color_0, latent_0 = self._seed_canvas(trans_out, H_out_true, W_out_true)
+        # Stage 2: SeedMLP (test_input copy-prior ile)
+        color_0, latent_0 = self._seed_canvas(
+            trans_out, H_out_true, W_out_true,
+            test_input=batch['target_input'],
+        )
 
         # Stage 3: NCA
         boundary_modes = trans_out['boundary_modes']
@@ -295,9 +302,12 @@ class GeometrikAkil(nn.Module):
 
         predictions = []
         for attempt in range(n_attempts):
-            # SeedMLP: test_input'a cross-attend ederek color_0 + latent_0 uretir
+            # SeedMLP: test_input'a cross-attend + copy-prior residual
             # (Training ile AYNI dagitim; train-test mismatch olmamali)
-            color_0, latent_0 = self._seed_canvas(trans_out, H_out, W_out)
+            color_0, latent_0 = self._seed_canvas(
+                trans_out, H_out, W_out,
+                test_input=test_input,
+            )
 
             # Attempt cesitliligi icin seed'e kucuk noise ekle (opsiyonel)
             if attempt > 0:

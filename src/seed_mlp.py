@@ -117,8 +117,9 @@ class SeedMLP(nn.Module):
 
         self.cross_attn = CrossAttention(P_dim, D_trans, n_heads, dropout)
 
-        # MLP: concat(query[P], ctx[D], task_emb[D]) → seed[L + N_COLOR]
-        MLP_in  = P_dim + D_trans + D_trans
+        # MLP: concat(query[P], ctx[D], task_emb[D], test_pixel[N_COLOR]) → seed[L + N_COLOR]
+        # test_pixel: pozisyon (x,y)'deki test_input'un one-hot degeri (copy-prior icin)
+        MLP_in  = P_dim + D_trans + D_trans + N_COLOR
         MLP_mid = 128
         MLP_out = L + N_COLOR
         self.mlp = nn.Sequential(
@@ -133,6 +134,12 @@ class SeedMLP(nn.Module):
         # NULL canvas icin baz logit (ilk katmani sifir-baslat)
         nn.init.zeros_(self.mlp[-1].weight)
         nn.init.zeros_(self.mlp[-1].bias)
+
+        # Copy-prior residual: identity icin guclu inductive bias.
+        # color_logits = mlp_out + copy_alpha * test_input[x,y]
+        # Init=3.0 → exp(3)≈20x, softmax true color ~95% (identity default)
+        # Model ogrenir: identity icin buyuk alpha, resize icin kucuk alpha
+        self.copy_alpha = nn.Parameter(torch.tensor(3.0))
 
     def _make_queries(self, H_out: int, W_out: int,
                       device=None) -> torch.Tensor:
@@ -149,7 +156,8 @@ class SeedMLP(nn.Module):
                 input_tokens: torch.Tensor,
                 task_emb: torch.Tensor,
                 H_out: int,
-                W_out: int) -> Tuple[torch.Tensor, torch.Tensor]:
+                W_out: int,
+                test_input: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Tek (H_out, W_out) boyutu icin canvas uretir.
         Batch icinde tum orneklerin ayni H_out, W_out oldugu varsayilir.
@@ -190,9 +198,18 @@ class SeedMLP(nn.Module):
         # task_emb'i N_q boyutuna genisle
         task_exp = task_emb.unsqueeze(1).expand(B, N_q, -1)   # [B, N_q, D_trans]
 
-        # MLP girisi
-        mlp_in = torch.cat([queries, ctx, task_exp], dim=-1)  # [B, N_q, P+D+D]
-        seed   = self.mlp(mlp_in)                              # [B, N_q, L+11]
+        # test_input'dan pozisyon-bazli pixel ozellikleri (copy-prior query)
+        # test_input: [B, N_COLOR, CANVAS_H, CANVAS_W] canvas (one-hot, NULL=10 disarida)
+        if test_input is not None:
+            # Output grid pozisyonlarindan test_input'un o pozisyondaki degerini al
+            test_slice = test_input[:, :, :H_out, :W_out]              # [B, 11, H_out, W_out]
+            test_flat  = test_slice.permute(0, 2, 3, 1).reshape(B, N_q, N_COLOR)
+        else:
+            test_flat = torch.zeros(B, N_q, N_COLOR, device=device)
+
+        # MLP girisi (copy-prior pixel dahil)
+        mlp_in = torch.cat([queries, ctx, task_exp, test_flat], dim=-1)  # [B, N_q, P+D+D+11]
+        seed   = self.mlp(mlp_in)                                         # [B, N_q, L+11]
 
         # Canvas'a yaz
         seed_r = seed.permute(0, 2, 1).view(B, self.L + N_COLOR, H_out, W_out)
@@ -200,6 +217,14 @@ class SeedMLP(nn.Module):
 
         latent_seed = seed_r[:, :self.L]     # [B, L, H_out, W_out]
         color_seed  = seed_r[:, self.L:]     # [B, 11, H_out, W_out]
+
+        # Copy-prior residual: identity icin guclu inductive bias
+        # color_seed += alpha * test_input_at_output_pos
+        # Identity'de test_input[x,y] dogru rengi iceriyor → argmax garantili dogru.
+        # Diger gorevler icin MLP offset ogrenir veya alpha kucultur.
+        if test_input is not None:
+            test_slice = test_input[:, :, :H_out, :W_out]   # [B, 11, H_out, W_out]
+            color_seed = color_seed + self.copy_alpha * test_slice
 
         # Hedef bolgeye yaz
         latent_0[:, :, :H_out, :W_out] = latent_seed
@@ -211,7 +236,8 @@ class SeedMLP(nn.Module):
                           input_tokens: torch.Tensor,
                           task_emb: torch.Tensor,
                           H_outs: torch.Tensor,
-                          W_outs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                          W_outs: torch.Tensor,
+                          test_input: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Batch icinde farkli H_out, W_out boyutlari icin canvas uretir.
         Her ornek ayri ayri islenir (batchlanmamis — daha yavas ama dogru).
@@ -237,10 +263,12 @@ class SeedMLP(nn.Module):
         for i in range(B):
             h = H_outs[i].item()
             w = W_outs[i].item()
+            ti_i = test_input[i:i+1] if test_input is not None else None
             c_i, l_i = self.forward(
                 input_tokens[i:i+1],
                 task_emb[i:i+1],
-                int(h), int(w)
+                int(h), int(w),
+                test_input=ti_i,
             )
             color_list.append(c_i[0])   # [11, canvas_H, canvas_W]
             latent_list.append(l_i[0])  # [L,  canvas_H, canvas_W]
@@ -265,13 +293,24 @@ if __name__ == "__main__":
 
     input_tokens = torch.randn(B, N_tok, D_TRANS, device=device)
     task_emb     = torch.randn(B, D_TRANS, device=device)
+    # Sahte test_input (one-hot canvas)
+    test_input = torch.zeros(B, N_COLOR, CANVAS_H, CANVAS_W, device=device)
+    test_input[:, NULL_IDX] = 1.0   # varsayilan NULL
+    # Hedef bolgeye rastgele renk ata
+    rand_colors = torch.randint(0, 10, (B, H_out, W_out), device=device)
+    test_input[:, :, :H_out, :W_out] = 0.0
+    for b in range(B):
+        for yy in range(H_out):
+            for xx in range(W_out):
+                test_input[b, rand_colors[b, yy, xx], yy, xx] = 1.0
 
     model = SeedMLP().to(device)
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"SeedMLP parametre sayisi: {param_count:,}")
 
-    # Tek boyut testi
-    color_logits, latent_0 = model(input_tokens, task_emb, H_out, W_out)
+    # Tek boyut testi (test_input ile)
+    color_logits, latent_0 = model(input_tokens, task_emb, H_out, W_out,
+                                   test_input=test_input)
     print(f"\nTek boyut ({H_out}x{W_out}):")
     print(f"  color_logits : {color_logits.shape}")   # [3, 11, 30, 30]
     print(f"  latent_0     : {latent_0.shape}")        # [3, 8, 30, 30]
@@ -291,7 +330,8 @@ if __name__ == "__main__":
     # Degisken boyut testi
     H_outs = torch.tensor([4, 8, 6], device=device)
     W_outs = torch.tensor([5, 7, 8], device=device)
-    c_var, l_var = model.forward_variable(input_tokens, task_emb, H_outs, W_outs)
+    c_var, l_var = model.forward_variable(input_tokens, task_emb, H_outs, W_outs,
+                                          test_input=test_input)
     print(f"\nDegisken boyut:")
     print(f"  color_logits : {c_var.shape}")   # [3, 11, 30, 30]
     print(f"  latent_0     : {l_var.shape}")    # [3, 8, 30, 30]
