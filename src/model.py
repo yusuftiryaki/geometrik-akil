@@ -138,6 +138,7 @@ class GeometrikAkil(nn.Module):
     def _encode_task(self, batch: dict) -> dict:
         """
         Stage 1: Egitim orneklerini Transformer'dan gecir.
+        test_input de sequence'a eklenir ki SeedMLP cross-attend edebilsin.
 
         Donus: transformer ciktilari
         """
@@ -145,6 +146,7 @@ class GeometrikAkil(nn.Module):
             train_inputs  = batch['train_inputs'],    # [B, max_ex, 11, H, W]
             train_outputs = batch['train_outputs'],   # [B, max_ex, 11, H, W]
             train_masks   = batch['train_masks'],     # [B, max_ex] bool
+            test_input    = batch.get('target_input', None),  # [B, 11, 30, 30]
         )
 
     def _seed_canvas(self, trans_out: dict,
@@ -283,8 +285,9 @@ class GeometrikAkil(nn.Module):
         device = train_inputs.device
         B = 1  # Inference'ta hep tek ornek
 
-        # Transformer encode
-        trans_out = self.transformer(train_inputs, train_outputs, train_masks)
+        # Transformer encode (test_input da dizi sonuna eklenir)
+        trans_out = self.transformer(train_inputs, train_outputs, train_masks,
+                                     test_input=test_input)
 
         H_out = trans_out['H_out']   # [1]
         W_out = trans_out['W_out']   # [1]
@@ -292,17 +295,17 @@ class GeometrikAkil(nn.Module):
 
         predictions = []
         for attempt in range(n_attempts):
-            # Farkli Gumbel ornekleme ile cesitlilik
+            # SeedMLP: test_input'a cross-attend ederek color_0 + latent_0 uretir
+            # (Training ile AYNI dagitim; train-test mismatch olmamali)
             color_0, latent_0 = self._seed_canvas(trans_out, H_out, W_out)
 
-            # NCA ile test girdisi uzerinde calistir
-            # test_input'i baslangic renk olarak kullan (input-conditional)
-            # Latent'i SeedMLP'den al
-            color_init = test_input  # [1, 11, 30, 30] — gercek test girdisi
+            # Attempt cesitliligi icin seed'e kucuk noise ekle (opsiyonel)
+            if attempt > 0:
+                color_0 = color_0 + 0.1 * torch.randn_like(color_0)
 
             final_state = self._run_nca(
-                color_0    = color_init,    # test girdisinden basla
-                latent_0   = latent_0,      # SeedMLP'den gelen latent tohum
+                color_0    = color_0,       # SeedMLP ciktisi (training ile ayni)
+                latent_0   = latent_0,
                 obj_mask_0 = trans_out['obj_mask_0'],
                 task_emb   = trans_out['task_emb'],
                 H_out      = H_out,

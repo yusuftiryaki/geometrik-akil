@@ -287,6 +287,8 @@ class StrategyTransformer(nn.Module):
         self.cls_in_token  = nn.Parameter(torch.randn(1, 1, D_trans) * 0.02)
         self.cls_out_token = nn.Parameter(torch.randn(1, 1, D_trans) * 0.02)
         self.pair_sep_token= nn.Parameter(torch.randn(1, 1, D_trans) * 0.02)
+        # Test query tokeni (test_input'un farkli bir rol oynadigini belirtir)
+        self.cls_test_token= nn.Parameter(torch.randn(1, 1, D_trans) * 0.02)
 
         # Ornek sira embedding (kac. egitim ornegi olduğunu kodlar)
         self.example_embed = nn.Embedding(max_examples, D_trans)
@@ -326,7 +328,8 @@ class StrategyTransformer(nn.Module):
 
     def _build_sequence(self, train_inputs: torch.Tensor,
                          train_outputs: torch.Tensor,
-                         train_masks: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                         train_masks: torch.Tensor,
+                         test_input: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Egitim orneklerinden token dizisi olusturur.
 
@@ -387,7 +390,21 @@ class StrategyTransformer(nn.Module):
             seq_parts.append(pair_seq)
             mask_parts.append(pair_mask)
 
-        seq          = torch.cat(seq_parts,  dim=1)  # [B, max_ex*(2+2*N_p), D]
+        # Test input'u ek bir bolum olarak ekle (varsa)
+        if test_input is not None:
+            # test_input: [B, 11, H, W]  canvas uzerinde
+            H_t, W_t = test_input.shape[-2], test_input.shape[-1]
+            posenc_test = make_posenc(H_t, W_t, P=P_DIM, device=device)  # [P, H, W]
+            posenc_test = posenc_test.unsqueeze(0).expand(B, -1, -1, -1)  # [B, P, H, W]
+            cls_test = self.cls_test_token.expand(B, -1, -1)
+            sep      = self.pair_sep_token.expand(B, -1, -1)
+            test_tok = self.patch_tokenizer(test_input, posenc_test)   # [B, N_p, D]
+            test_seq = torch.cat([cls_test, test_tok, sep], dim=1)  # [B, 2+N_p, D]
+            test_mask= torch.zeros(B, test_seq.shape[1], dtype=torch.bool, device=device)
+            seq_parts.append(test_seq)
+            mask_parts.append(test_mask)
+
+        seq          = torch.cat(seq_parts,  dim=1)  # [B, ..., D]
         padding_mask = torch.cat(mask_parts, dim=1)  # [B, N_total] bool
 
         # [CLS] global token en basa ekle
@@ -404,6 +421,7 @@ class StrategyTransformer(nn.Module):
                 train_inputs:  torch.Tensor,
                 train_outputs: torch.Tensor,
                 train_masks:   torch.Tensor,
+                test_input:    Optional[torch.Tensor] = None,
                 ground_truth_H: Optional[torch.Tensor] = None,
                 ground_truth_W: Optional[torch.Tensor] = None) -> dict:
         """
@@ -432,8 +450,9 @@ class StrategyTransformer(nn.Module):
         B = train_inputs.shape[0]
         device = train_inputs.device
 
-        # Token dizisi olustur
-        seq, pad_mask = self._build_sequence(train_inputs, train_outputs, train_masks)
+        # Token dizisi olustur (test_input varsa o da eklenir)
+        seq, pad_mask = self._build_sequence(train_inputs, train_outputs,
+                                              train_masks, test_input=test_input)
         # seq: [B, N_total, D], pad_mask: [B, N_total] bool
 
         # Transformer katmanlari

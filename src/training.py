@@ -590,10 +590,20 @@ def train_epoch(model: GeometrikAkil,
         n_batches += 1
 
         if log_interval > 0 and batch_idx % log_interval == 0:
-            print(f"  step={step_counter[0]:5d} | "
-                  f"loss={losses['total'].item():.4f} | "
-                  f"recon={losses['L_recon'].item():.4f} | "
-                  f"acc={losses['accuracy']:.3f}")
+            # SizeHead accuracy (H ve W dogru tahmin edildi mi?)
+            with torch.no_grad():
+                h_pred = model_out['h_logits'].argmax(dim=-1) + 1   # 0-indexed -> 1-indexed
+                w_pred = model_out['w_logits'].argmax(dim=-1) + 1
+                h_ok = (h_pred == model_out['H_out_true']).float().mean().item()
+                w_ok = (w_pred == model_out['W_out_true']).float().mean().item()
+            print(f"  step={step_counter[0]:5d} | loss={losses['total'].item():.3f} | "
+                  f"recon={losses['L_recon'].item():.3f} "
+                  f"size={losses['L_size'].item():.3f} "
+                  f"out={losses['L_out'].item():.3f} "
+                  f"mask={losses['L_mask'].item():.3f} "
+                  f"obj={losses['L_obj'].item():.3f} | "
+                  f"pix_acc={losses['accuracy']:.3f} "
+                  f"H_acc={h_ok:.2f} W_acc={w_ok:.2f}")
 
     # Ortalamalar
     return {k: v / max(n_batches, 1) for k, v in totals.items()}
