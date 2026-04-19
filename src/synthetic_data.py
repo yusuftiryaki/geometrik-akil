@@ -99,11 +99,16 @@ def find_bbox(grid: np.ndarray, bg: int = 0) -> Optional[Tuple[int, int, int, in
 # Donusum Fonksiyonlari (her biri bir ArcTask uretir)
 # ────────────────────────────────────────────────────────────────────────
 
-def task_identity(rng: random.Random, n_train: int = 3) -> ArcTask:
-    """out = in (temel baseline)."""
+def task_identity(rng: random.Random, n_train: int = 3,
+                  fixed_size: Optional[Tuple[int, int]] = None) -> ArcTask:
+    """out = in (temel baseline).
+    fixed_size=(H,W) verilirse tum gorevler o boyutta olur (generalization testi icin)."""
     examples = []
     for i in range(n_train + 1):
-        H, W = rng.randint(3, 10), rng.randint(3, 10)
+        if fixed_size is not None:
+            H, W = fixed_size
+        else:
+            H, W = rng.randint(3, 10), rng.randint(3, 10)
         inp = random_grid(H, W, n_colors=rng.randint(2, 4), rng=rng)
         out = inp.copy()
         examples.append(_to_example(inp, out))
@@ -392,7 +397,8 @@ TASK_GENERATORS: List[Tuple[str, Callable]] = [
 def generate_synthetic_tasks(n_tasks: int = 1000,
                              n_train_per_task: int = 3,
                              weights: Optional[dict] = None,
-                             seed: int = 42) -> dict:
+                             seed: int = 42,
+                             fixed_size: Optional[Tuple[int, int]] = None) -> dict:
     """
     Sentetik ARC benzeri gorevler uret.
 
@@ -402,6 +408,8 @@ def generate_synthetic_tasks(n_tasks: int = 1000,
     n_train_per_task  : Her gorevde kac egitim ornegi
     weights           : {generator_name: weight} dict, None -> esit
     seed              : RNG seed
+    fixed_size        : (H, W) verilirse tum gorevler o boyutta (sadece identity
+                        ve boyut koruyan generator'larda etkili)
 
     Donus
     -----
@@ -417,16 +425,21 @@ def generate_synthetic_tasks(n_tasks: int = 1000,
         gen_weights = [weights[n] for n in names]
     name_to_fn = dict(TASK_GENERATORS)
 
+    # fixed_size destekleyen generator'lar
+    fixed_size_supported = {'identity'}
+
     tasks = {}
     for i in range(n_tasks):
         name = rng.choices(names, weights=gen_weights, k=1)[0]
         fn = name_to_fn[name]
         try:
-            task = fn(rng, n_train=n_train_per_task)
+            if fixed_size is not None and name in fixed_size_supported:
+                task = fn(rng, n_train=n_train_per_task, fixed_size=fixed_size)
+            else:
+                task = fn(rng, n_train=n_train_per_task)
         except Exception as e:
             continue
         task_id = f"{task.task_id}_{i:05d}"
-        # ArcTask hashing/ID tekrari sorunsuz; sadece string guncelliyoruz
         tasks[task_id] = ArcTask(task_id, task.train_examples, task.test_examples)
 
     return tasks

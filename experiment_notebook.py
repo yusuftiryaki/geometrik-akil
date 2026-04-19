@@ -90,16 +90,19 @@ for k, v in model.param_count().items():
 # CELL 3: Curriculum Seviyeleri
 # ═══════════════════════════════════════════════════════
 
+# Deney 1: Sabit 4x4 identity -- generalization izole
+# Deney 2 (basari sonrasi): degisken boyut identity
+# Deney 3 (basari sonrasi): tam curriculum
+
+FIXED_SIZE = (4, 4)   # None yap -> degisken boyut
 CURRICULUM = [
-    ("L0_identity",     ["identity"]),
-    ("L1_color",        ["identity", "color_swap"]),
-    ("L2_reflection",   ["identity", "color_swap", "reflection"]),
-    ("L3_translation",  ["identity", "color_swap", "reflection", "translation"]),
-    ("L4_geometric",    ["reflection", "translation", "rotation", "scale"]),
-    ("L5_mantik",       ["tile", "gravity", "outline", "recolor_size", "crop"]),
+    ("L0_identity_4x4", ["identity"]),
+    # ("L1_color",        ["identity", "color_swap"]),
+    # ("L2_reflection",   ["identity", "color_swap", "reflection"]),
+    # ...
 ]
 
-SUCCESS_THRESHOLD = 0.50   # %50 exact-match = seviye basarili
+SUCCESS_THRESHOLD = 0.50
 
 
 # ═══════════════════════════════════════════════════════
@@ -207,13 +210,15 @@ def show_success_examples(model, tasks_dict, device, max_samples=2):
         print(f"    in={tuple(inp.shape)}  out={tuple(gt.shape)}  [exact match]")
 
 
-def measure_accuracy_per_type(model, type_names, device, n_tasks_per_type=20, seed=999):
+def measure_accuracy_per_type(model, type_names, device, n_tasks_per_type=20, seed=999,
+                              fixed_size=None):
     """Her tip icin bagimsiz 20 gorev uret ve accuracy hesapla."""
     results = {}
     for t in type_names:
         tasks = generate_synthetic_tasks(
             n_tasks=n_tasks_per_type, n_train_per_task=3,
             weights={t: 1.0}, seed=seed,
+            fixed_size=fixed_size,
         )
         if not tasks:
             results[t] = 0.0
@@ -228,12 +233,14 @@ def measure_accuracy_per_type(model, type_names, device, n_tasks_per_type=20, se
 # ═══════════════════════════════════════════════════════
 
 def train_on_types(model, type_names, n_epochs=10, lr=3e-4,
-                   n_tasks=500, batch_size=8, log_interval=50):
+                   n_tasks=500, batch_size=8, log_interval=50,
+                   fixed_size=None):
     """Belirli tiplerdeki sentetik gorevlerle egit."""
     tasks = generate_synthetic_tasks(
         n_tasks=n_tasks, n_train_per_task=3,
         weights={t: 1.0 for t in type_names},
         seed=SEED,
+        fixed_size=fixed_size,
     )
     if not tasks:
         print("  UYARI: Gorev uretilemedi.")
@@ -279,11 +286,13 @@ def train_on_types(model, type_names, n_epochs=10, lr=3e-4,
     return history
 
 
-def measure_sizehead_accuracy(model, type_names, device, n_tasks=30, seed=555):
+def measure_sizehead_accuracy(model, type_names, device, n_tasks=30, seed=555,
+                              fixed_size=None):
     """SizeHead'in H,W tahmininin dogruluk orani."""
     tasks = generate_synthetic_tasks(
         n_tasks=n_tasks, n_train_per_task=3,
         weights={t: 1.0 for t in type_names}, seed=seed,
+        fixed_size=fixed_size,
     )
     if not tasks:
         return 0.0, 0.0
@@ -327,8 +336,17 @@ def measure_sizehead_accuracy(model, type_names, device, n_tasks=30, seed=555):
 # CELL 6: ANA DENEY — Curriculum Yurutme
 # ═══════════════════════════════════════════════════════
 
-EPOCHS_PER_LEVEL = 10
-TASKS_PER_LEVEL  = 500
+EPOCHS_PER_LEVEL = 20       # 10 -> 20 (daha uzun)
+TASKS_PER_LEVEL  = 1000     # 500 -> 1000 (daha fazla veri)
+BATCH_SIZE       = 32       # 8 -> 32 (stabil gradient)
+LR               = 1e-4     # 3e-4 -> 1e-4 (daha az osilasyon)
+
+print(f"Deney ayarlari:")
+print(f"  fixed_size  = {FIXED_SIZE}")
+print(f"  epochs      = {EPOCHS_PER_LEVEL}")
+print(f"  n_tasks     = {TASKS_PER_LEVEL}")
+print(f"  batch_size  = {BATCH_SIZE}")
+print(f"  lr          = {LR}")
 
 overall_results = {}
 level_accuracy_history = []
@@ -344,18 +362,22 @@ for level_name, types in CURRICULUM:
         model, types,
         n_epochs=EPOCHS_PER_LEVEL,
         n_tasks=TASKS_PER_LEVEL,
-        lr=3e-4,
+        lr=LR,
+        batch_size=BATCH_SIZE,
+        fixed_size=FIXED_SIZE,
     )
 
     # SizeHead accuracy (test-time)
-    h_acc, w_acc = measure_sizehead_accuracy(model, types, device, n_tasks=50)
+    h_acc, w_acc = measure_sizehead_accuracy(model, types, device, n_tasks=50,
+                                             fixed_size=FIXED_SIZE)
     print(f"\n  --- SizeHead Test Accuracy ---")
     print(f"    H tahmini dogru: {h_acc:.2%}   W tahmini dogru: {w_acc:.2%}")
 
     # Bu seviyedeki tum tipler icin ayri accuracy
     print(f"\n  --- {level_name} Test Accuracy (tip bazinda, exact match) ---")
     acc_per_type = measure_accuracy_per_type(model, types, device,
-                                              n_tasks_per_type=30, seed=777)
+                                              n_tasks_per_type=30, seed=777,
+                                              fixed_size=FIXED_SIZE)
     for t, a in acc_per_type.items():
         status = "[OK]" if a >= SUCCESS_THRESHOLD else "[X]"
         print(f"    {status} {t:15s}: {a:.3f} ({a*100:.1f}%)")
@@ -373,6 +395,7 @@ for level_name, types in CURRICULUM:
     eval_tasks = generate_synthetic_tasks(
         n_tasks=30, n_train_per_task=3,
         weights={t: 1.0 for t in types}, seed=555,
+        fixed_size=FIXED_SIZE,
     )
 
     if overall_acc >= SUCCESS_THRESHOLD:
